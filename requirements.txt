@@ -1,0 +1,4 @@
+# Flaky Test Predictor - Requirements
+# Day 1: Testing only (ast is built-in)
+
+pytest>=7.0.0
