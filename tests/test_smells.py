@@ -325,3 +325,131 @@ class TestStatsExtraction:
         assert len(results) > 0
         # This file imports threading
         assert results[0].stats["import_count"] >= 1
+
+
+# =============================================================================
+# Regression Tests - Bugs caught in code review
+# =============================================================================
+
+class TestMysteryGuestSubstringRegression:
+    """Regression tests for substring collision bugs in mystery_guest."""
+
+    def test_redistribute_not_flagged_as_redis(self):
+        """'redistribute' should NOT trigger mystery_guest (redis substring)."""
+        source = '''
+def test_redistribute_load():
+    balancer.redistribute()
+    assert balancer.is_balanced()
+'''
+        results = analyze_source(source)
+        assert len(results) == 1
+        assert not results[0].smells["mystery_guest"], \
+            "redistribute() should not be flagged as redis access"
+
+    def test_reopen_not_flagged_as_open(self):
+        """'reopen' should NOT trigger mystery_guest (open substring)."""
+        source = '''
+def test_reopen_connection_pool():
+    pool.reopen()
+    assert pool.is_connected()
+'''
+        results = analyze_source(source)
+        assert len(results) == 1
+        assert not results[0].smells["mystery_guest"], \
+            "reopen() should not be flagged as open() access"
+
+    def test_actual_redis_is_flagged(self):
+        """Actual redis module usage should be flagged."""
+        source = '''
+import redis
+def test_redis_connection():
+    r = redis.Redis()
+    r.set("key", "value")
+'''
+        results = analyze_source(source)
+        assert len(results) == 1
+        assert results[0].smells["mystery_guest"], \
+            "redis.Redis() should be flagged as external resource"
+
+
+class TestTestRunWarLocalMutationRegression:
+    """Regression tests for false positives on local object mutation."""
+
+    def test_local_object_mutation_not_flagged(self):
+        """Local object attribute assignment should NOT trigger test_run_war."""
+        source = '''
+def test_local_instance_mutation():
+    widget = Widget()
+    widget.color = "red"
+    assert widget.color == "red"
+'''
+        results = analyze_source(source)
+        assert len(results) == 1
+        assert not results[0].smells["test_run_war"], \
+            "Local object mutation should not be flagged as shared state"
+
+    def test_global_keyword_still_flagged(self):
+        """Using 'global' keyword should still be flagged."""
+        source = '''
+counter = 0
+def test_global_increment():
+    global counter
+    counter += 1
+    assert counter == 1
+'''
+        results = analyze_source(source)
+        assert len(results) == 1
+        assert results[0].smells["test_run_war"], \
+            "global keyword should be flagged"
+
+    def test_class_attribute_mutation_flagged(self):
+        """ClassName.attr = value should still be flagged."""
+        source = '''
+def test_class_state_modification():
+    SharedState.value = 42
+    assert SharedState.value == 42
+'''
+        results = analyze_source(source)
+        assert len(results) == 1
+        assert results[0].smells["test_run_war"], \
+            "Class attribute mutation should be flagged"
+
+
+class TestAssertionRouletteArgCountRegression:
+    """Regression tests for assertion message detection with varying arg counts."""
+
+    def test_assertTrue_with_message_not_flagged(self):
+        """assertTrue(x, msg) should NOT trigger roulette (2 args = has message)."""
+        source = '''
+def test_assertTrue_with_message():
+    self.assertTrue(condition_a, "custom message A")
+    self.assertTrue(condition_b, "custom message B")
+'''
+        results = analyze_source(source)
+        assert len(results) == 1
+        assert not results[0].smells["assertion_roulette"], \
+            "assertTrue with message should not be flagged"
+
+    def test_assertTrue_without_message_flagged(self):
+        """Multiple assertTrue(x) without messages should trigger roulette."""
+        source = '''
+def test_assertTrue_no_message():
+    self.assertTrue(condition_a)
+    self.assertTrue(condition_b)
+'''
+        results = analyze_source(source)
+        assert len(results) == 1
+        assert results[0].smells["assertion_roulette"], \
+            "Multiple assertTrue without messages should be flagged"
+
+    def test_assertEqual_with_message_not_flagged(self):
+        """assertEqual(a, b, msg) should NOT trigger roulette."""
+        source = '''
+def test_assertEqual_with_message():
+    self.assertEqual(x, 1, "x should be 1")
+    self.assertEqual(y, 2, "y should be 2")
+'''
+        results = analyze_source(source)
+        assert len(results) == 1
+        assert not results[0].smells["assertion_roulette"], \
+            "assertEqual with message should not be flagged"

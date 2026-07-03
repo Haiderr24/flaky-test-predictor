@@ -47,23 +47,17 @@ class SmellDetector:
         'asyncio': {'create_task', 'ensure_future', 'run'},
     }
 
-    # Patterns indicating external resource access
-    EXTERNAL_RESOURCE_PATTERNS = {
-        'open',  # filesystem
-        'requests',  # HTTP
-        'urllib',
-        'socket',
-        'sqlite3',
-        'psycopg2',
-        'pymongo',
-        'redis',
-        'subprocess',
-        'os.system',
-        'os.popen',
+    # External resource modules/functions - matched exactly, not as substrings
+    EXTERNAL_RESOURCE_MODULES = {
+        'requests', 'urllib', 'socket', 'sqlite3',
+        'psycopg2', 'pymongo', 'redis', 'subprocess',
     }
 
-    # File/path related functions
-    FILE_ACCESS_PATTERNS = {'open', 'read', 'write', 'Path', 'os.path'}
+    # External resource function calls (exact match on function name)
+    EXTERNAL_RESOURCE_FUNCS = {'open'}
+
+    # External resource attribute patterns (module.func style)
+    EXTERNAL_RESOURCE_ATTRS = {'os.system', 'os.popen'}
 
     # Path existence check functions
     EXISTENCE_CHECKS = {'exists', 'isfile', 'isdir', 'is_file', 'is_dir'}
@@ -144,27 +138,28 @@ class SmellDetector:
         """
         for node in ast.walk(func):
             if isinstance(node, ast.Call):
-                func_name = self._get_call_name(node)
-
-                # Check for external resource access patterns
-                for pattern in self.EXTERNAL_RESOURCE_PATTERNS:
-                    if pattern in func_name:
-                        return True
-
-                # Check imports for known external libraries
+                # Check for built-in open() call
                 if isinstance(node.func, ast.Name):
+                    if node.func.id in self.EXTERNAL_RESOURCE_FUNCS:
+                        return True
+                    # Check if name is imported from external module
                     if node.func.id in self._imports:
                         imported_from = self._imports[node.func.id]
-                        for pattern in self.EXTERNAL_RESOURCE_PATTERNS:
-                            if pattern in imported_from:
+                        # Check if import source starts with external module
+                        for module in self.EXTERNAL_RESOURCE_MODULES:
+                            if imported_from == module or imported_from.startswith(f"{module}."):
                                 return True
 
-            # Check for attribute access to external modules
-            if isinstance(node, ast.Attribute):
-                full_name = self._get_attribute_name(node)
-                for pattern in self.EXTERNAL_RESOURCE_PATTERNS:
-                    if pattern in full_name:
+                # Check for module.func() style calls like requests.get()
+                if isinstance(node.func, ast.Attribute):
+                    full_name = self._get_attribute_name(node.func)
+                    # Check exact attribute patterns
+                    if full_name in self.EXTERNAL_RESOURCE_ATTRS:
                         return True
+                    # Check if starts with external module (e.g., requests.get)
+                    for module in self.EXTERNAL_RESOURCE_MODULES:
+                        if full_name == module or full_name.startswith(f"{module}."):
+                            return True
 
         return False
 
@@ -187,6 +182,23 @@ class SmellDetector:
         Assertion Roulette occurs when a test has multiple assertions
         and it's unclear which one failed without additional context.
         """
+        # Unittest assert methods and their expected arg count (without message)
+        # If actual args > expected, they have a message
+        ASSERT_ARG_COUNTS = {
+            'assertEqual': 2, 'assertNotEqual': 2,
+            'assertTrue': 1, 'assertFalse': 1,
+            'assertIs': 2, 'assertIsNot': 2,
+            'assertIsNone': 1, 'assertIsNotNone': 1,
+            'assertIn': 2, 'assertNotIn': 2,
+            'assertIsInstance': 2, 'assertNotIsInstance': 2,
+            'assertGreater': 2, 'assertGreaterEqual': 2,
+            'assertLess': 2, 'assertLessEqual': 2,
+            'assertAlmostEqual': 2, 'assertNotAlmostEqual': 2,
+            'assertRegex': 2, 'assertNotRegex': 2,
+            'assertCountEqual': 2,
+            'assertRaises': 1, 'assertWarns': 1,
+        }
+
         assertions = []
 
         for node in ast.walk(func):
@@ -198,9 +210,11 @@ class SmellDetector:
             # Also check for unittest-style assertions
             if isinstance(node, ast.Call):
                 if isinstance(node.func, ast.Attribute):
-                    if node.func.attr.startswith('assert'):
-                        # Check if has message argument (usually last arg)
-                        has_message = len(node.args) > 2 or len(node.keywords) > 0
+                    method_name = node.func.attr
+                    if method_name.startswith('assert'):
+                        expected_args = ASSERT_ARG_COUNTS.get(method_name, 2)
+                        # Has message if more args than expected or has keywords
+                        has_message = len(node.args) > expected_args or len(node.keywords) > 0
                         assertions.append(has_message)
 
         # Roulette = multiple assertions without messages
@@ -250,30 +264,52 @@ class SmellDetector:
 
         Test Run War occurs when tests modify shared state,
         causing interference between test runs.
+
+        Note: This detector cannot distinguish local object mutation
+        (widget.color = "red") from shared state mutation without
+        data-flow analysis. We only flag clear indicators: global/nonlocal
+        keywords and class-level attribute access patterns.
         """
+        # Collect names assigned locally in this function
+        local_names = set()
         for node in ast.walk(func):
-            # Check for global keyword
+            # Track simple assignments: x = ...
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(node, ast.Name):
+                        local_names.add(target.id)
+            # Track function arguments
+            if isinstance(node, ast.arg):
+                local_names.add(node.arg)
+
+        for node in ast.walk(func):
+            # Check for global keyword - definite shared state
             if isinstance(node, ast.Global):
                 return True
 
-            # Check for nonlocal keyword
+            # Check for nonlocal keyword - definite shared state
             if isinstance(node, ast.Nonlocal):
                 return True
 
-            # Check for assignment to module-level attributes
+            # Check for class-level modifications via cls or __class__
+            if isinstance(node, ast.Attribute):
+                attr_name = self._get_attribute_name(node)
+                if '__class__' in attr_name:
+                    return True
+                # cls.something = ... pattern
+                if attr_name.startswith('cls.'):
+                    return True
+
+            # Check for assignment to ClassName.attr (capitalized = likely class)
             if isinstance(node, ast.Assign):
                 for target in node.targets:
                     if isinstance(target, ast.Attribute):
-                        # Check if accessing class/module attribute
                         if isinstance(target.value, ast.Name):
-                            # Assigning to SomeClass.attribute or module.attribute
-                            return True
-
-            # Check for modifications to class attributes via self.__class__
-            if isinstance(node, ast.Attribute):
-                attr_name = self._get_attribute_name(node)
-                if '__class__' in attr_name or 'cls.' in attr_name:
-                    return True
+                            name = target.value.id
+                            # If name starts with uppercase and isn't a local,
+                            # it's likely a class/module reference
+                            if name[0].isupper() and name not in local_names:
+                                return True
 
         return False
 
@@ -285,6 +321,14 @@ class SmellDetector:
         methods or behaviors, making it fragile and hard to maintain.
 
         Heuristic: More than 5 distinct method calls on test subject.
+
+        Known limitation: This counts ALL method calls including unittest
+        assertion methods (assertEqual, assertTrue, etc.). A test with
+        7 different assert methods on one object would be flagged, even
+        though it may be a focused, well-written test. Properly filtering
+        assertion methods from subject-under-test methods would require
+        knowing which object is 'self' vs the test subject, which needs
+        more sophisticated analysis than single-pass AST walking.
         """
         method_calls = set()
 
