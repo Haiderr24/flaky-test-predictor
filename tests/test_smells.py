@@ -12,7 +12,7 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from smells import TestSmellDetector, analyze_source
+from smells import SmellDetector, analyze_source
 
 
 # Path to fixtures directory

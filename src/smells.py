@@ -21,7 +21,7 @@ class SmellResult:
     stats: Dict[str, int]
 
 
-class TestSmellDetector:
+class SmellDetector:
     """
     Detects test smells in Python test code using AST analysis.
 
@@ -32,8 +32,11 @@ class TestSmellDetector:
     4. Assertion Roulette - multiple assertions without clear messages
     5. Resource Optimism - accesses resources without existence checks
     6. Test Run War - reads/writes shared/global state
-    7. Eager Testing - tests too many things at once (many method calls)
-    8. Indirect Testing - tests through other objects instead of directly
+    7. Eager Testing - tests too many things at once (>5 method calls, heuristic)
+    8. Indirect Testing - tests through other objects (depth >= 2, heuristic)
+
+    Note: eager_testing threshold (>5 calls) and indirect_testing depth (>=2)
+    are judgment calls based on practical observation, not derived from papers.
     """
 
     # Modules/functions that indicate thread/process spawning
@@ -431,7 +434,7 @@ def analyze_file(file_path: str) -> List[SmellResult]:
     with open(file_path, 'r') as f:
         source_code = f.read()
 
-    detector = TestSmellDetector(source_code)
+    detector = SmellDetector(source_code)
     return detector.analyze_all_tests()
 
 
@@ -445,5 +448,5 @@ def analyze_source(source_code: str) -> List[SmellResult]:
     Returns:
         List of SmellResult for each test function in the code
     """
-    detector = TestSmellDetector(source_code)
+    detector = SmellDetector(source_code)
     return detector.analyze_all_tests()
