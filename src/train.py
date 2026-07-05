@@ -94,6 +94,7 @@ def print_feature_importance(clf):
 
 def save_model(clf, path):
     """Save trained model to disk."""
+    path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(clf, path)
     print(f"\nModel saved to: {path}")
 
